@@ -21,8 +21,24 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
     discharge_summary: '',
     discharge_medications: '',
     follow_up_instructions: '',
-    discharge_condition: 'Improved' as 'Improved' | 'Stable' | 'Deteriorated' | 'Deceased',
+    discharge_condition: 'Improved' as 'Improved' | 'died',
   });
+
+  const validateForm = () => {
+    if (!formData.discharge_date) {
+      toast.error('Discharge date is required');
+      return false;
+    }
+    if (!formData.discharge_diagnosis.trim()) {
+      toast.error('Discharge diagnosis is required');
+      return false;
+    }
+    if (!formData.discharge_summary.trim()) {
+      toast.error('Discharge summary is required');
+      return false;
+    }
+    return true;
+  };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
@@ -31,10 +47,14 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!validateForm()) {
+      return;
+    }
+
     setLoading(true);
 
     try {
-      // Get the logged-in user
       const userString = localStorage.getItem('user');
       if (!userString) {
         toast.error('Please log in again');
@@ -44,48 +64,69 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
 
       const user = JSON.parse(userString);
 
-      // Update patient status to discharged
+      // Start a transaction using multiple queries
+      const { error: dischargeError } = await supabase
+        .from('discharges')
+        .insert({
+          patient_id: patient.id,
+          ...formData,
+          discharged_by: user.id,
+          created_at: new Date().toISOString()
+        });
+
+      if (dischargeError) {
+        console.error('Discharge error:', dischargeError);
+        throw new Error('Failed to create discharge record');
+      }
+
+      // Update patient status
       const { error: updateError } = await supabase
         .from('patients')
         .update({
           status: 'Discharged',
-          updated_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
         })
         .eq('id', patient.id);
 
-      if (updateError) throw updateError;
+      if (updateError) {
+        console.error('Patient update error:', updateError);
+        throw new Error('Failed to update patient status');
+      }
 
-      // Create discharge record
-      const { error: dischargeError } = await supabase
-        .from('discharges')
-        .insert([
-          {
-            patient_id: patient.id,
-            ...formData,
-            discharged_by: user.id,
-            created_at: new Date().toISOString(),
-          },
-        ]);
+      // Update medications
+      const { error: medicationError } = await supabase
+        .from('medications')
+        .update({
+          status: 'Completed',
+          end_date: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('patient_id', patient.id)
+        .eq('status', 'Active');
 
-      if (dischargeError) throw dischargeError;
+      if (medicationError) {
+        console.error('Medication update error:', medicationError);
+        // Don't throw here as this is not critical
+      }
 
       // Create notification
-      await supabase.from('notifications').insert([
-        {
+      await supabase
+        .from('notifications')
+        .insert({
           type: 'discharge',
-          message: `Patient ${patient.name} has been discharged`,
-          severity: 'info',
+          message: `Patient ${patient.name} has been discharged (${formData.discharge_condition})`,
+          severity: formData.discharge_condition === 'died' ? 'critical' : 'info',
           user_id: user.id,
           patient_id: patient.id,
-        },
-      ]);
+          created_at: new Date().toISOString()
+        });
 
       toast.success('Patient discharged successfully');
       onDischarge();
       navigate('/dashboard');
     } catch (error) {
       console.error('Error discharging patient:', error);
-      toast.error('Failed to discharge patient');
+      toast.error('Failed to discharge patient. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -198,9 +239,7 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
             >
               <option value="Improved">Improved</option>
-              <option value="Stable">Stable</option>
-              <option value="Deteriorated">Deteriorated</option>
-              <option value="Deceased">Deceased</option>
+              <option value="died">Died</option>
             </select>
           </div>
         </div>
