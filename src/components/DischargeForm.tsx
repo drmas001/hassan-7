@@ -21,8 +21,13 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
     discharge_summary: '',
     discharge_medications: '',
     follow_up_instructions: '',
-    discharge_condition: 'Improved' as 'Improved' | 'died',
+    discharge_condition: 'Improved' as 'Improved' | 'Stable' | 'Deteriorated' | 'Deceased',
   });
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
 
   const validateForm = () => {
     if (!formData.discharge_date) {
@@ -38,11 +43,6 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
       return false;
     }
     return true;
-  };
-
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -64,23 +64,29 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
 
       const user = JSON.parse(userString);
 
-      // Start a transaction using multiple queries
-      const { error: dischargeError } = await supabase
+      // Create discharge record
+      const { data: discharge, error: dischargeError } = await supabase
         .from('discharges')
         .insert({
           patient_id: patient.id,
-          ...formData,
+          discharge_date: new Date(formData.discharge_date).toISOString(),
+          discharge_diagnosis: formData.discharge_diagnosis.trim(),
+          discharge_summary: formData.discharge_summary.trim(),
+          discharge_medications: formData.discharge_medications.trim() || null,
+          follow_up_instructions: formData.follow_up_instructions.trim() || null,
+          discharge_condition: formData.discharge_condition,
           discharged_by: user.id,
           created_at: new Date().toISOString()
-        });
+        })
+        .select()
+        .single();
 
       if (dischargeError) {
-        console.error('Discharge error:', dischargeError);
-        throw new Error('Failed to create discharge record');
+        throw new Error(`Failed to create discharge record: ${dischargeError.message}`);
       }
 
       // Update patient status
-      const { error: updateError } = await supabase
+      const { error: patientError } = await supabase
         .from('patients')
         .update({
           status: 'Discharged',
@@ -88,13 +94,12 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
         })
         .eq('id', patient.id);
 
-      if (updateError) {
-        console.error('Patient update error:', updateError);
-        throw new Error('Failed to update patient status');
+      if (patientError) {
+        throw new Error(`Failed to update patient status: ${patientError.message}`);
       }
 
       // Update medications
-      const { error: medicationError } = await supabase
+      const { error: medicationsError } = await supabase
         .from('medications')
         .update({
           status: 'Completed',
@@ -104,29 +109,29 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
         .eq('patient_id', patient.id)
         .eq('status', 'Active');
 
-      if (medicationError) {
-        console.error('Medication update error:', medicationError);
-        // Don't throw here as this is not critical
+      if (medicationsError) {
+        console.error('Warning: Failed to update medications:', medicationsError);
       }
 
-      // Create notification
-      await supabase
-        .from('notifications')
-        .insert({
-          type: 'discharge',
-          message: `Patient ${patient.name} has been discharged (${formData.discharge_condition})`,
-          severity: formData.discharge_condition === 'died' ? 'critical' : 'info',
-          user_id: user.id,
-          patient_id: patient.id,
-          created_at: new Date().toISOString()
-        });
+      // Create notification using the secure function
+      const { error: notificationError } = await supabase.rpc('create_system_notification', {
+        p_type: 'discharge',
+        p_message: `Patient ${patient.name} has been discharged`,
+        p_severity: formData.discharge_condition === 'Deceased' ? 'critical' : 'info',
+        p_user_id: user.id,
+        p_patient_id: patient.id
+      });
+
+      if (notificationError) {
+        console.error('Warning: Failed to create notification:', notificationError);
+      }
 
       toast.success('Patient discharged successfully');
       onDischarge();
       navigate('/dashboard');
     } catch (error) {
-      console.error('Error discharging patient:', error);
-      toast.error('Failed to discharge patient. Please try again.');
+      console.error('Error during discharge process:', error);
+      toast.error(error instanceof Error ? error.message : 'Failed to discharge patient');
     } finally {
       setLoading(false);
     }
@@ -203,7 +208,6 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
             </label>
             <textarea
               name="discharge_medications"
-              required
               value={formData.discharge_medications}
               onChange={handleChange}
               rows={4}
@@ -218,7 +222,6 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
             </label>
             <textarea
               name="follow_up_instructions"
-              required
               value={formData.follow_up_instructions}
               onChange={handleChange}
               rows={4}
@@ -239,7 +242,9 @@ export function DischargeForm({ patient, onDischarge }: DischargeFormProps) {
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
             >
               <option value="Improved">Improved</option>
-              <option value="died">Died</option>
+              <option value="Stable">Stable</option>
+              <option value="Deteriorated">Deteriorated</option>
+              <option value="Deceased">Deceased</option>
             </select>
           </div>
         </div>
